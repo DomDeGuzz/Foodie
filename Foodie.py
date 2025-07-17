@@ -8,6 +8,25 @@ from recipe_storage import save_recipe, get_recipe, list_recipes
 from recipe_scaler import parse_ingredient_string, scale_ingredients
 from discord import app_commands
 
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    print(f"✅ Web server started on port {port}")
+    server.serve_forever()
+
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running.")
+
+threading.Thread(target=run_web_server).start()
+
+
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
