@@ -8,6 +8,13 @@ from recipe_storage import save_recipe, get_recipe, list_recipes
 from recipe_scaler import parse_ingredient_string, scale_ingredients
 from discord import app_commands
 
+from Keep_alive import keep_alive
+keep_alive()
+
+from discord.ui import View, Button
+import math
+
+
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -56,6 +63,48 @@ async def on_ready():
 
     print(f"Let's make some food, {bot.user.name}!")
 
+class RecipePaginationView(View):
+    def __init__(self, user_id, recipes, per_page=5, message=None):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.recipes = recipes
+        self.per_page = per_page
+        self.current_page = 0
+        self.total_pages = math.ceil(len(recipes) / per_page)
+        self.message = message
+
+    def get_page_content(self):
+        start = self.current_page * self.per_page
+        end = start + self.per_page
+        page_items = self.recipes[start:end]
+
+        content = f"📚 **Saved Recipes (Page {self.current_page + 1}/{self.total_pages})**\n"
+        content += "\n".join(f"- {name}" for name in page_items)
+        return content
+
+    async def update_message(self, interaction=None):
+        if interaction:
+            await interaction.response.edit_message(content=self.get_page_content(), view=self)
+        elif self.message:
+            await self.message.edit(content=self.get_page_content(), view=self)
+
+    @discord.ui.button(label="⬅️ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_page(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ You can't control this pagination.", ephemeral=True)
+            return
+        if self.current_page > 0:
+            self.current_page -= 1
+            await self.update_message(interaction)
+
+    @discord.ui.button(label="Next ➡️", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ You can't control this pagination.", ephemeral=True)
+            return
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            await self.update_message(interaction)
 
 @bot.event
 async def on_member_join(member):
@@ -223,7 +272,7 @@ async def save(ctx, name: str):
     if not hasattr(bot, "last_scaled_recipe"):
         await ctx.send("❌ No recipe to save. Use `!scale` first.")
         return
-    save_recipe(normalize(name), bot.last_scaled_recipe["ingredients"], bot.last_scaled_recipe["servings"])
+    save_recipe(ctx.author.id, normalize(name), bot.last_scaled_recipe["ingredients"], bot.last_scaled_recipe["servings"])
     await ctx.send(f"✅ Saved recipe as `{name}`.")
 
 @bot.tree.command(name="save", description="Save the last scaled recipe")
@@ -232,37 +281,55 @@ async def save_slash(interaction: discord.Interaction, name: str):
     if not hasattr(bot, "last_scaled_recipe"):
         await interaction.response.send_message("❌ No recipe to save. Use `/scale` first.", ephemeral=True)
         return
-    save_recipe(normalize(name), bot.last_scaled_recipe["ingredients"], bot.last_scaled_recipe["servings"])
+    save_recipe(interaction.user.id, normalize(name), bot.last_scaled_recipe["ingredients"], bot.last_scaled_recipe["servings"])
     await interaction.response.send_message(f"✅ Saved recipe as `{name}`.")
 
 @bot.command()
 async def recipe(ctx, name: str):
-    recipe = get_recipe(normalize(name))
+    recipe = get_recipe(ctx.author.id, normalize(name))
     if not recipe:
         await ctx.send("❌ Recipe not found.")
         return
 
-    lines = [f"📖 **{name.title()}** ({recipe['servings']} servings)"]
-    for ing in recipe["ingredients"]:
-        lines.append(f"- {ing['name']}: {ing['scaled_quantity']} {ing['unit']}")
-    await ctx.send("\n".join(lines))
+    view = RecipePaginationView(
+        user_id=ctx.author.id,
+        recipe_name=name,
+        servings=recipe["servings"],
+        ingredients=recipe["ingredients"]
+    )
+    await ctx.send(view.get_page_content(), view=view)
+
 
 @bot.tree.command(name="recipe", description="Get a saved recipe by name")
 @app_commands.describe(name="Recipe name to retrieve")
 async def recipe_slash(interaction: discord.Interaction, name: str):
-    recipe = get_recipe(normalize(name))
+    recipe = get_recipe(interaction.user.id, normalize(name))
     if not recipe:
-        await interaction.response.send_message("❌ Recipe not found.")
+        await interaction.response.send_message("❌ Recipe not found.", ephemeral=True)
         return
 
-    lines = [f"📖 **{name.title()}** ({recipe['servings']} servings)"]
-    for ing in recipe["ingredients"]:
-        lines.append(f"- {ing['name']}: {ing['scaled_quantity']} {ing['unit']}")
-    await interaction.response.send_message("\n".join(lines))
+    ingredients = recipe["ingredients"]
+    servings = recipe["servings"]
+
+    if len(ingredients) <= 10:
+        # No need for pagination
+        lines = [f"📖 **{name.title()}** ({servings} servings)"]
+        for ing in ingredients:
+            lines.append(f"- {ing['name']}: {ing['scaled_quantity']} {ing['unit']}")
+        await interaction.response.send_message("\n".join(lines))
+    else:
+        view = RecipePaginationView(
+            user_id=interaction.user.id,
+            recipe_name=name,
+            servings=servings,
+            ingredients=ingredients,
+        )
+        await interaction.response.send_message(view.get_page_content(), view=view)
+
 
 @bot.command()
 async def recipes(ctx):
-    names = list_recipes()
+    names = list_recipes(ctx.author.id)
     if not names:
         await ctx.send("📭 No saved recipes.")
     else:
@@ -270,7 +337,7 @@ async def recipes(ctx):
 
 @bot.tree.command(name="recipes", description="List all saved recipes")
 async def recipes_slash(interaction: discord.Interaction):
-    names = list_recipes()
+    names = list_recipes(interaction.user.id)
     if not names:
         await interaction.response.send_message("📭 No saved recipes.")
     else:
@@ -278,7 +345,7 @@ async def recipes_slash(interaction: discord.Interaction):
 
 @bot.command(name="recipe_add_ingredient")
 async def recipe_add_ingredient(ctx, recipe_name: str, ingredient_name: str, quantity: float, unit: str):
-    recipe = get_recipe(normalize(recipe_name))
+    recipe = get_recipe(ctx.author.id, recipe_name)
     if not recipe:
         await ctx.send(f"❌ Recipe `{recipe_name}` not found.")
         return
@@ -291,14 +358,14 @@ async def recipe_add_ingredient(ctx, recipe_name: str, ingredient_name: str, qua
     }
 
     recipe["ingredients"].append(new_ingredient)
-    save_recipe(recipe_name, recipe["ingredients"], recipe["servings"])
+    save_recipe(ctx.author.id, recipe_name, recipe["ingredients"], recipe["servings"])
 
     await ctx.send(f"✅ Added `{ingredient_name}` ({quantity} {unit}) to `{recipe_name}`.")
 
 @bot.tree.command(name="recipe_add_ingredient", description="Add an ingredient to a saved recipe")
 @app_commands.describe(recipe_name="Name of the recipe", ingredient_name="Ingredient name", quantity="Amount", unit="Unit (e.g., cup)")
 async def recipe_add_slash(interaction: discord.Interaction, recipe_name: str, ingredient_name: str, quantity: float, unit: str):
-    recipe = get_recipe(normalize(recipe_name))
+    recipe = get_recipe(interaction.user.id, recipe_name)
     if not recipe:
         await interaction.response.send_message(f"❌ Recipe `{recipe_name}` not found.")
         return
@@ -311,13 +378,13 @@ async def recipe_add_slash(interaction: discord.Interaction, recipe_name: str, i
     }
 
     recipe["ingredients"].append(new_ingredient)
-    save_recipe(recipe_name, recipe["ingredients"], recipe["servings"])
+    save_recipe(interaction.user.id, recipe_name, recipe["ingredients"], recipe["servings"])
 
     await interaction.response.send_message(f"✅ Added `{ingredient_name}` ({quantity} {unit}) to `{recipe_name}`.")
 
 @bot.command(name="recipe_remove_ingredient")
 async def recipe_remove_ingredient(ctx, recipe_name: str, ingredient_name: str):
-    recipe = get_recipe(normalize(recipe_name))
+    recipe = get_recipe(ctx.author.id, recipe_name)
     if not recipe:
         await ctx.send(f"❌ Recipe `{recipe_name}` not found.")
         return
@@ -332,13 +399,13 @@ async def recipe_remove_ingredient(ctx, recipe_name: str, ingredient_name: str):
     if before == after:
         await ctx.send(f"❌ `{ingredient_name}` not found in `{recipe_name}`.")
     else:
-        save_recipe(recipe_name, recipe["ingredients"], recipe["servings"])
+        save_recipe(ctx.author.id, recipe_name, recipe["ingredients"], recipe["servings"])
         await ctx.send(f"🗑️ Removed `{ingredient_name}` from `{recipe_name}`.")
 
 @bot.tree.command(name="recipe_remove_ingredient", description="Remove an ingredient from a saved recipe")
 @app_commands.describe(recipe_name="Name of the recipe", ingredient_name="Ingredient to remove")
 async def recipe_remove_slash(interaction: discord.Interaction, recipe_name: str, ingredient_name: str):
-    recipe = get_recipe(normalize(recipe_name))
+    recipe = get_recipe(interaction.user.id, recipe_name)
     if not recipe:
         await interaction.response.send_message(f"❌ Recipe `{recipe_name}` not found.")
         return
@@ -353,12 +420,12 @@ async def recipe_remove_slash(interaction: discord.Interaction, recipe_name: str
     if before == after:
         await interaction.response.send_message(f"❌ `{ingredient_name}` not found in `{recipe_name}`.")
     else:
-        save_recipe(recipe_name, recipe["ingredients"], recipe["servings"])
+        save_recipe(interaction.user.id, recipe_name, recipe["ingredients"], recipe["servings"])
         await interaction.response.send_message(f"🗑️ Removed `{ingredient_name}` from `{recipe_name}`.")
 
 @bot.command(name="edit_ingredient")
 async def edit_ingredient(ctx, recipe_name: str, ingredient_name: str, new_quantity: float, new_unit: str):
-    recipe = get_recipe(normalize(recipe_name))
+    recipe = get_recipe(ctx.author.id, recipe_name)
     if not recipe:
         await ctx.send(f"❌ Recipe `{recipe_name}` not found.")
         return
@@ -376,7 +443,7 @@ async def edit_ingredient(ctx, recipe_name: str, ingredient_name: str, new_quant
         await ctx.send(f"❌ Ingredient `{ingredient_name}` not found in `{recipe_name}`.")
         return
 
-    save_recipe(recipe_name, recipe["ingredients"], recipe["servings"])
+    save_recipe(ctx.author.id, recipe_name, recipe["ingredients"], recipe["servings"])
     await ctx.send(f"✏️ Updated `{ingredient_name}` in `{recipe_name}` to {new_quantity} {new_unit}.")
 
 from recipe_storage import delete_recipe
@@ -384,7 +451,7 @@ from recipe_storage import delete_recipe
 @bot.tree.command(name="edit_ingredient", description="Edit an ingredient in a saved recipe")
 @app_commands.describe(recipe_name="Recipe name", ingredient_name="Ingredient to edit", new_quantity="New quantity", new_unit="New unit")
 async def edit_ingredient_slash(interaction: discord.Interaction, recipe_name: str, ingredient_name: str, new_quantity: float, new_unit: str):
-    recipe = get_recipe(normalize(recipe_name))
+    recipe = get_recipe(interaction.user.id, recipe_name)
     if not recipe:
         await interaction.response.send_message(f"❌ Recipe `{recipe_name}` not found.")
         return
@@ -402,13 +469,13 @@ async def edit_ingredient_slash(interaction: discord.Interaction, recipe_name: s
         await interaction.response.send_message(f"❌ Ingredient `{ingredient_name}` not found in `{recipe_name}`.")
         return
 
-    save_recipe(recipe_name, recipe["ingredients"], recipe["servings"])
+    save_recipe(interaction.user.id, recipe_name, recipe["ingredients"], recipe["servings"])
     await interaction.response.send_message(f"✏️ Updated `{ingredient_name}` in `{recipe_name}` to {new_quantity} {new_unit}.")
 
 
 @bot.command(name="delete_recipe")
 async def delete_recipe_cmd(ctx, name: str):
-    success = delete_recipe(normalize(name))
+    success = delete_recipe(ctx.author.id, name)
     if success:
         await ctx.send(f"🗑️ Deleted recipe `{name}`.")
     else:
@@ -419,7 +486,7 @@ async def delete_recipe_cmd(ctx, name: str):
 async def delete_recipe_slash(interaction: discord.Interaction, name: str):
     from recipe_storage import delete_recipe
 
-    success = delete_recipe(normalize(name))
+    success = delete_recipe(interaction.user.id, name)
     if success:
         await interaction.response.send_message(f"🗑️ Deleted recipe `{name}`.")
     else:
