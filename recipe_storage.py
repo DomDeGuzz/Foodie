@@ -1,47 +1,45 @@
 import json
 import os
 
-STORAGE_FILE = "saved_recipes.json"  # Unified constant name
+DATA_FILE = "recipes.json"
 
-def load_recipes():
-    if not os.path.exists(STORAGE_FILE):
-        return {}
-    with open(STORAGE_FILE, "r") as f:
-        return json.load(f)
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-def save_recipe(name, ingredients, servings):
-    data = load_recipes()
-    data[name.lower()] = {
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def save_recipe(user_id, name, ingredients, servings):
+    data = load_data()
+    user_key = str(user_id)
+    if user_key not in data:
+        data[user_key] = {}
+    data[user_key][name] = {
         "ingredients": ingredients,
         "servings": servings
     }
-    with open(STORAGE_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    save_data(data)
 
-def get_recipe(name):
-    data = load_recipes()
-    return data.get(name.lower())
+def get_recipe(user_id, name):
+    data = load_data()
+    return data.get(str(user_id), {}).get(name)
 
-def list_recipes():
-    return list(load_recipes().keys())
+def list_recipes(user_id):
+    data = load_data()
+    return list(data.get(str(user_id), {}).keys())
 
-def delete_recipe(name):
-    name = name.lower()  # normalize input
-    if not os.path.exists(STORAGE_FILE):
-        return False
-
-    with open(STORAGE_FILE, "r") as f:
-        data = json.load(f)
-
-    if name not in data:
-        return False
-
-    del data[name]
-
-    with open(STORAGE_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-    return True
+def delete_recipe(user_id, name):
+    data = load_data()
+    user_key = str(user_id)
+    if user_key in data and name in data[user_key]:
+        del data[user_key][name]
+        save_data(data)
+        return True
+    return False
 
 
 
